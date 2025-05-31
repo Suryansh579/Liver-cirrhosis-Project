@@ -1,0 +1,88 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import SimpleImputer
+from sklearn.svm import SVC
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout, Bidirectional
+from imblearn.over_sampling import RandomOverSampler
+from tensorflow.keras.utils import to_categorical
+
+file_path = 'preprocessed_ilpd.csv'
+data = pd.read_csv(file_path)
+X = data.iloc[:, :-1].values
+y = data.iloc[:, -1].values
+
+# Oversample minority class
+ros = RandomOverSampler(random_state=42)
+X_resampled, y_resampled = ros.fit_resample(X, y)
+
+scaler = StandardScaler()
+X_resampled = scaler.fit_transform(X_resampled)
+
+# Reshape the features for the LSTM model
+X_reshaped = X_resampled.reshape((X_resampled.shape[0], X_resampled.shape[1], 1))
+y_categorical = to_categorical(y_resampled) # Convert the labels to categorical (one-hot encoding)
+
+n_classes = y_categorical.shape[1]
+
+#  create a BiLSTM model
+def create_bilstm_model(input_shape, n_classes):
+    model = Sequential()
+    model.add(Bidirectional(LSTM(32), input_shape=input_shape))
+    model.add(Dense(10, activation='relu'))
+    model.add(Dense(n_classes, activation='softmax'))
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+# SVM model
+svm_model = SVC(kernel='linear', random_state=42, probability=True)
+
+# Cross-validation
+kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+cv_accuracy = []
+
+for train_index, test_index in kf.split(X_resampled, y_resampled):
+    X_train_val, X_test = X_reshaped[train_index], X_reshaped[test_index]
+    y_train_val, y_test = y_categorical[train_index], y_categorical[test_index]
+    
+    val_split = int(0.8 * len(X_train_val))
+    X_train, X_val = X_train_val[:val_split], X_train_val[val_split:]
+    y_train, y_val = y_train_val[:val_split], y_train_val[val_split:]
+
+    bilstm_model = create_bilstm_model((X_train.shape[1], X_train.shape[2]), n_classes)
+    bilstm_model.fit(X_train, y_train, epochs=100, batch_size=16, verbose=0)
+    
+    val_pred_probs = bilstm_model.predict(X_val)
+
+
+    if len(np.unique(np.argmax(y_val, axis=1))) > 1:
+        svm_model.fit(val_pred_probs, np.argmax(y_val, axis=1))
+        test_pred_probs = bilstm_model.predict(X_test)
+        y_pred = svm_model.predict(test_pred_probs)
+        y_test_classes = np.argmax(y_test, axis=1)
+        accuracy = accuracy_score(y_test_classes, y_pred)
+        cv_accuracy.append(accuracy)
+
+if cv_accuracy:
+    print(f'Average Cross-Validation Accuracy of Ensemble Model: {np.mean(cv_accuracy):.4f}')
+else:
+    print("No valid folds were available for training the SVM model.")
+
+# train the BiLSTM model on the entire dataset and then train SVM
+bilstm_model.fit(X_reshaped, y_categorical, epochs=100, batch_size=16)
+bilstm_pred_probs = bilstm_model.predict(X_reshaped)
+svm_model.fit(bilstm_pred_probs, np.argmax(y_categorical, axis=1))
+
+# Evaluate the final ensemble model on the entire dataset
+y_pred = svm_model.predict(bilstm_model.predict(X_reshaped))
+y_classes = np.argmax(y_categorical, axis=1)
+
+# Confusion matrix and classification report
+final_cm = confusion_matrix(y_classes, y_pred)
+print("Confusion Matrix for Ensemble Model:")
+print(final_cm)
+
+print("Classification Report:")
+print(classification_report(y_classes, y_pred))
