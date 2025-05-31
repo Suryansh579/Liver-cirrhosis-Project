@@ -1,0 +1,76 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.model_selection import StratifiedKFold
+
+# Load the dataset
+cols_df1 = ["age", "gender", "tb", "db", "alkphos", "sgpt", "sgot", "tp", "alb", "t/g ratio", "class"]
+df1 = pd.read_csv(r"C:\Users\DELL\Downloads\DIC Liver cirhosis\Liver cirrhosis UCI Dataset.csv", names=cols_df1)
+
+def remove_outliers(df, columns):
+    low = 0.02
+    high = 0.98
+    for col in columns:
+        # Ensure the column is numeric
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Drop NaN values for the current column to avoid issues with quantile calculation
+        col_without_nan = df[col].dropna()
+        quant_low, quant_high = col_without_nan.quantile([low, high])
+        df = df[(df[col] >= quant_low) & (df[col] <= quant_high)]
+    return df
+
+# Preprocess data
+def preprocess_data(df, target_col, categorical_cols=None, outlier_cols=None, fillna_strategy='mean'):
+    # Handle outliers if specified
+    if outlier_cols:
+        df = remove_outliers(df, outlier_cols)
+    
+    # Check if the DataFrame is empty after removing outliers
+    if df.empty:
+        raise ValueError("All rows removed by outlier removal. Check the outlier removal criteria.")
+    
+    # Separate numeric and categorical columns
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if categorical_cols:
+        numeric_cols = [col for col in numeric_cols if col not in categorical_cols]
+    
+    # Fill missing values with appropriate strategy based on column type
+    imputer_numeric = SimpleImputer(strategy=fillna_strategy)
+    df[numeric_cols] = imputer_numeric.fit_transform(df[numeric_cols])
+
+    if categorical_cols:
+        # Encode categorical columns
+        label_encoder = LabelEncoder()
+        for col in categorical_cols:
+            df[col] = label_encoder.fit_transform(df[col])
+        # Fill missing values for categorical columns with the most frequent value after encoding
+        imputer_categorical = SimpleImputer(strategy='most_frequent')
+        df[categorical_cols] = imputer_categorical.fit_transform(df[categorical_cols])
+    
+    # Separate features and target
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+    
+    return X, y
+
+# Preprocess the data
+X, y = preprocess_data(df1, target_col="class", categorical_cols=["gender"], outlier_cols=["age", "tb", "db", "alkphos", "sgpt", "sgot", "tp", "alb", "t/g ratio"], fillna_strategy='mean')
+
+# Save preprocessed data to a new CSV file
+preprocessed_data = pd.concat([X, y], axis=1)
+preprocessed_data.to_csv('preprocessed_ilpd.csv', index=False)
+
+# Calculate number of samples for each class
+class_counts = y.value_counts()
+print("Number of samples for each class before resampling:")
+print(class_counts)
+
+# Initialize cross-validation
+kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+
+# Example: Display cross-validation split information
+for train_index, test_index in kf.split(X, y):
+    X_train, X_test = X.iloc[train_index], X.iloc[test_index]
+    y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+    print(f"TRAIN: {len(train_index)}, TEST: {len(test_index)}")
