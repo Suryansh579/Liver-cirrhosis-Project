@@ -1,0 +1,145 @@
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score, confusion_matrix
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv1D, MaxPooling1D, Flatten, Dense
+from imblearn.over_sampling import RandomOverSampler
+from tensorflow.keras.utils import to_categorical
+
+# Load the dataset
+cols_df1 = ["age", "gender", "tb", "db", "alkphos", "sgpt", "sgot", "tp", "alb", "t/g ratio", "class"]
+df1 = pd.read_csv("Indian Liver Patient Dataset (ILPD).csv", names=cols_df1)
+
+# Function to remove outliers
+def remove_outliers(df, columns):
+    low = 0.02
+    high = 0.98
+    for col in columns:
+        # Ensure the column is numeric
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Drop NaN values for the current column to avoid issues with quantile calculation
+        col_without_nan = df[col].dropna()
+        quant_low, quant_high = col_without_nan.quantile([low, high])
+        df = df[(df[col] >= quant_low) & (df[col] <= quant_high)]
+    return df
+
+# Preprocess the data
+def preprocess_data(df, target_col, categorical_cols=None, outlier_cols=None, fillna_strategy='mean'):
+    # Handle outliers if specified
+    if outlier_cols:
+        df = remove_outliers(df, outlier_cols)
+    
+    if df.empty:
+        raise ValueError("All rows removed by outlier removal. Check the outlier removal criteria.")
+    
+    numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+    if categorical_cols:
+        numeric_cols = [col for col in numeric_cols if col not in categorical_cols]
+    
+    # Fill missing values with appropriate strategy based on column type
+    imputer_numeric = SimpleImputer(strategy=fillna_strategy)
+    df[numeric_cols] = imputer_numeric.fit_transform(df[numeric_cols])
+    
+    if categorical_cols:
+        # Encode categorical columns
+        label_encoder = LabelEncoder()
+        for col in categorical_cols:
+            df[col] = label_encoder.fit_transform(df[col])
+        imputer_categorical = SimpleImputer(strategy='most_frequent')
+        df[categorical_cols] = imputer_categorical.fit_transform(df[categorical_cols])
+    
+    # Separate features and target
+    X = df.drop(columns=[target_col])
+    y = df[target_col]
+    
+    # Adjust target variable to be in the range [0, 1]
+    y = y - 1
+    
+    return X, y
+
+# Preprocess the data
+X, y = preprocess_data(df1, target_col="class", categorical_cols=["gender"], 
+                       outlier_cols=["age", "tb", "db", "alkphos", "sgpt", "sgot", "tp", "alb", "t/g ratio"], 
+                       fillna_strategy='mean')
+
+# Apply oversampling to balance the classes
+ros = RandomOverSampler(random_state=42)
+X_resampled, y_resampled = ros.fit_resample(X, y)
+
+# Scale the features
+scaler = StandardScaler()
+X_resampled = scaler.fit_transform(X_resampled)
+
+# Reshape data to fit into Conv1D input
+X_reshaped = X_resampled.reshape((X_resampled.shape[0], X_resampled.shape[1], 1))
+
+# One-hot encode the target variable
+y_categorical = to_categorical(y_resampled)
+
+# Define CNN model function
+def create_cnn_model(input_shape):
+    model = Sequential()
+    model.add(Conv1D(32, kernel_size=2, activation='relu', input_shape=input_shape))
+    model.add(MaxPooling1D(pool_size=2))
+    model.add(Flatten())
+    model.add(Dense(10, activation='relu'))
+    model.add(Dense(2, activation='softmax'))
+    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+    return model
+
+# Define Random Forest model
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+
+# Implement cross-validation (Stratified K-Fold)
+kf = StratifiedKFold(n_splits=10, shuffle=True, random_state=42)
+cv_accuracy = []
+
+for train_index, test_index in kf.split(X_reshaped, y_resampled):
+    X_train_val, X_test = X_reshaped[train_index], X_reshaped[test_index]
+    y_train_val, y_test = y_categorical[train_index], y_categorical[test_index]
+    
+    # Further split train_val into train and validation sets
+    val_split = int(0.8 * len(X_train_val))
+    X_train, X_val = X_train_val[:val_split], X_train_val[val_split:]
+    y_train, y_val = y_train_val[:val_split], y_train_val[val_split:]
+
+    # Define the CNN model
+    cnn_model = create_cnn_model((X_train.shape[1], 1))
+
+    # Train the CNN model
+    cnn_model.fit(X_train, y_train, epochs=150, batch_size=16, verbose=0)
+
+    # Use CNN model to predict on validation set
+    val_pred_probs = cnn_model.predict(X_val)
+
+    # Train Random Forest on validation set predictions
+    rf_model.fit(val_pred_probs, np.argmax(y_val, axis=1))
+
+    # Evaluate the ensemble model on test set
+    test_pred_probs = cnn_model.predict(X_test)
+    y_pred = rf_model.predict(test_pred_probs)
+    y_test_classes = np.argmax(y_test, axis=1)
+    accuracy = accuracy_score(y_test_classes, y_pred)
+    cv_accuracy.append(accuracy)
+
+# Calculate and print average cross-validation accuracy of ensemble model
+print(f'Average Cross-Validation Accuracy of Ensemble Model: {np.mean(cv_accuracy):.4f}')
+
+# Optionally, you can train the CNN model on the entire dataset and then train Random Forest
+cnn_model.fit(X_reshaped, y_categorical, epochs=150, batch_size=16)
+cnn_pred_probs = cnn_model.predict(X_reshaped)
+rf_model.fit(cnn_pred_probs, np.argmax(y_categorical, axis=1))
+
+# Optionally, make predictions on a test set or validation set
+# Replace X_test and y_test with your actual test/validation data
+y_pred = rf_model.predict(cnn_model.predict(X_test))
+y_test_classes = np.argmax(y_test, axis=1)
+
+# Compute confusion matrix for the final ensemble model
+final_cm = confusion_matrix(y_test_classes, y_pred)
+print("Confusion Matrix for Ensemble Model:")
+print(final_cm)
